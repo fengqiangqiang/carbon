@@ -1,6 +1,6 @@
 {
-  "generated": "2026-06-21T22:03:32.744Z",
-  "totalTools": 1209,
+  "generated": "2026-07-27T00:16:26.564Z",
+  "totalTools": 1210,
   "modules": 15,
   "tools": [
     {
@@ -2028,7 +2028,7 @@
           "description": {
             "type": "string"
           },
-          "lines: Array<{\n      accountId: string;\n      description": {}
+          "lines: Array<{\r\n      accountId: string;\r\n      description": {}
         },
         "required": [
           "journalEntryId",
@@ -2605,7 +2605,7 @@
           "periodEnd": {
             "type": "string"
           },
-          "lines: Array<{\n      fixedAssetId: string;\n      amount: number;\n      taxAmount": {}
+          "lines: Array<{\r\n      fixedAssetId: string;\r\n      amount: number;\r\n      taxAmount": {}
         },
         "required": [
           "periodEnd"
@@ -4130,7 +4130,7 @@
           "receiptId": {
             "type": "string"
           },
-          "lines: {\n      id: string;\n      receivedQuantity: number | null;\n      requiresSerialTracking": {
+          "lines: {\r\n      id: string;\r\n      receivedQuantity: number | null;\r\n      requiresSerialTracking": {
             "type": "array",
             "items": {}
           }
@@ -6654,7 +6654,7 @@
           "locationId": {
             "type": "string"
           },
-          "lines: Array<{\n      itemId: string;\n      fromStorageUnitId": {},
+          "lines: Array<{\r\n      itemId: string;\r\n      fromStorageUnitId": {},
           "stockTransferId": {
             "type": "string"
           },
@@ -8072,7 +8072,7 @@
       "description": "activate method version",
       "paramCount": 1,
       "serviceParams": [
-        "client",
+        "db",
         "payload"
       ],
       "injectAuth": [
@@ -16906,6 +16906,39 @@
       }
     },
     {
+      "name": "production_copyItemMethodToJob",
+      "module": "production",
+      "classification": "WRITE",
+      "description": "copy item method to job",
+      "paramCount": 3,
+      "serviceParams": [
+        "db",
+        "client",
+        "input"
+      ],
+      "injectAuth": [
+        "companyId",
+        "createdBy",
+        "updatedBy"
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "itemId": {
+            "type": "string"
+          },
+          "jobId": {
+            "type": "string"
+          },
+          "configuration": {}
+        },
+        "required": [
+          "itemId",
+          "jobId"
+        ]
+      }
+    },
+    {
       "name": "production_insertJob",
       "module": "production",
       "classification": "WRITE",
@@ -18202,7 +18235,7 @@
       "paramCount": 1,
       "serviceParams": [
         "client",
-        "{\n    sourcePurchaseOrderId,\n    companyId,\n    companyGroupId,\n    userId\n  }"
+        "{\r\n    sourcePurchaseOrderId,\r\n    companyId,\r\n    companyGroupId,\r\n    userId\r\n  }"
       ],
       "injectAuth": [
         "companyId",
@@ -19610,7 +19643,7 @@
           "name": {
             "type": "string"
           },
-          "address: {\n      addressLine1": {},
+          "address: {\r\n      addressLine1": {},
           "customFields": {}
         },
         "required": [
@@ -19870,7 +19903,7 @@
           "name": {
             "type": "string"
           },
-          "address: {\n      addressLine1": {},
+          "address: {\r\n      addressLine1": {},
           "customFields": {}
         },
         "required": [
@@ -22751,7 +22784,7 @@
               },
               "status": {},
               "source": {},
-              "// might be needed later for filtering by assignee\n    assignee": {
+              "// might be needed later for filtering by assignee\r\n    assignee": {
                 "type": "array",
                 "items": {
                   "type": "string"
@@ -30316,7 +30349,7 @@
           "name": {
             "type": "string"
           },
-          "address: {\n      addressLine1": {},
+          "address: {\r\n      addressLine1": {},
           "customFields": {}
         },
         "required": [
@@ -30798,7 +30831,7 @@
           "name": {
             "type": "string"
           },
-          "address: {\n      addressLine1": {},
+          "address: {\r\n      addressLine1": {},
           "customFields": {}
         },
         "required": [
@@ -34333,18 +34366,18 @@
       "schema": {
         "type": "object",
         "properties": {
-          "/** undefined disables expiry badges company-wide. */\n    nearExpiryWarningDays": {},
-          "/** Seed for the \"Shelf-life (days)\" input on new items. */\n    defaultShelfLifeDays": {
+          "/** undefined disables expiry badges company-wide. */\r\n    nearExpiryWarningDays": {},
+          "/** Seed for the \"Shelf-life (days)\" input on new items. */\r\n    defaultShelfLifeDays": {
             "type": "number"
           },
-          "/** MIN expiry scope for Calculated-mode finished products. */\n    calculatedInputScope": {
+          "/** MIN expiry scope for Calculated-mode finished products. */\r\n    calculatedInputScope": {
             "type": "string",
             "enum": [
               "AllInputs",
               "ManagedInputsOnly"
             ]
           },
-          "/** Policy enforced when an operator consumes an expired entity. */\n    expiredEntityPolicy": {
+          "/** Policy enforced when an operator consumes an expired entity. */\r\n    expiredEntityPolicy": {
             "type": "string",
             "enum": [
               "Warn",
@@ -34354,10 +34387,10 @@
           }
         },
         "required": [
-          "/** undefined disables expiry badges company-wide. */\n    nearExpiryWarningDays",
-          "/** Seed for the \"Shelf-life (days)\" input on new items. */\n    defaultShelfLifeDays",
-          "/** MIN expiry scope for Calculated-mode finished products. */\n    calculatedInputScope",
-          "/** Policy enforced when an operator consumes an expired entity. */\n    expiredEntityPolicy"
+          "/** undefined disables expiry badges company-wide. */\r\n    nearExpiryWarningDays",
+          "/** Seed for the \"Shelf-life (days)\" input on new items. */\r\n    defaultShelfLifeDays",
+          "/** MIN expiry scope for Calculated-mode finished products. */\r\n    calculatedInputScope",
+          "/** Policy enforced when an operator consumes an expired entity. */\r\n    expiredEntityPolicy"
         ]
       }
     },
@@ -37389,7 +37422,7 @@
       "paramCount": 2,
       "serviceParams": [
         "client",
-        "{\n    id,\n    name,\n    companyId\n  }"
+        "{\r\n    id,\r\n    name,\r\n    companyId\r\n  }"
       ],
       "injectAuth": [
         "companyId",

@@ -3,13 +3,19 @@ import { requirePermissions } from "@carbon/auth/auth.server";
 import { getCarbonServiceRole } from "@carbon/auth/client.server";
 import { flash } from "@carbon/auth/session.server";
 import { validationError, validator } from "@carbon/form";
+import { trigger } from "@carbon/jobs";
 import { msg } from "@lingui/core/macro";
 import type { ActionFunctionArgs } from "react-router";
 import { redirect } from "react-router";
 import { useUrlParams, useUser } from "~/hooks";
-import { insertJob, jobValidator } from "~/modules/production";
+import {
+  copyItemMethodToJob,
+  insertJob,
+  jobValidator
+} from "~/modules/production";
 import { JobForm } from "~/modules/production/ui/Jobs";
 import type { MethodItemType } from "~/modules/shared";
+import { getDatabaseClient } from "~/services/database.server";
 import { setCustomFields } from "~/utils/form";
 import type { Handle } from "~/utils/handle";
 import { path } from "~/utils/path";
@@ -45,14 +51,19 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
-  const result = await insertJob(getCarbonServiceRole(), {
-    ...data,
-    jobId: data.jobId || undefined,
-    configuration,
-    companyId,
-    createdBy: userId,
-    customFields: setCustomFields(formData)
-  });
+  const serviceRole = getCarbonServiceRole();
+  const result = await insertJob(
+    serviceRole,
+    {
+      ...data,
+      jobId: data.jobId || undefined,
+      configuration,
+      companyId,
+      createdBy: userId,
+      customFields: setCustomFields(formData)
+    },
+    { skipMethod: true, skipRecalculate: true }
+  );
 
   if (result.error || !result.data) {
     throw redirect(
@@ -60,6 +71,34 @@ export async function action({ request }: ActionFunctionArgs) {
       await flash(request, error(result.error, "Failed to insert job"))
     );
   }
+
+  const copyMethod = await copyItemMethodToJob(
+    getDatabaseClient(),
+    serviceRole,
+    {
+      itemId: data.itemId,
+      jobId: result.data.id,
+      companyId,
+      userId,
+      configuration
+    }
+  );
+
+  if (copyMethod.error) {
+    throw redirect(
+      path.to.jobs,
+      await flash(request, error(copyMethod.error, "Failed to copy job method"))
+    );
+  }
+
+  await trigger("recalculate", {
+    type: "jobRequirements",
+    id: result.data.id,
+    companyId,
+    userId
+  }).catch((err) => {
+    console.error("Failed to trigger job requirements recalculation", err);
+  });
 
   throw redirect(path.to.job(result.data.id));
 }

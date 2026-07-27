@@ -65,19 +65,92 @@ import {
 import type { InventoryItemType } from "./types";
 
 export async function activateMethodVersion(
-  client: SupabaseClient<Database>,
+  db: Kysely<KyselyDatabase>,
   payload: {
     id: string;
     companyId: string;
     userId: string;
   }
 ) {
-  return client.functions.invoke<{ convertedId: string }>("convert", {
-    body: {
-      type: "methodVersionToActive",
-      ...payload
-    }
-  });
+  try {
+    const updatedAt = now(getLocalTimeZone()).toAbsoluteString();
+
+    await db.transaction().execute(async (trx) => {
+      const makeMethod = await trx
+        .selectFrom("makeMethod")
+        .select(["id", "itemId"])
+        .where("id", "=", payload.id)
+        .where("companyId", "=", payload.companyId)
+        .executeTakeFirst();
+
+      if (!makeMethod) {
+        throw new Error("Make method not found");
+      }
+
+      const relatedMakeMethods = await trx
+        .selectFrom("makeMethod")
+        .select(["id", "status"])
+        .where("itemId", "=", makeMethod.itemId)
+        .where("companyId", "=", payload.companyId)
+        .execute();
+
+      const draftMakeMethodIds = relatedMakeMethods
+        .filter(
+          (method) => method.id !== payload.id && method.status === "Draft"
+        )
+        .map((method) => method.id);
+
+      const activeMakeMethodIds = relatedMakeMethods
+        .filter(
+          (method) => method.id !== payload.id && method.status === "Active"
+        )
+        .map((method) => method.id);
+
+      const relatedMakeMethodIds = [
+        ...draftMakeMethodIds,
+        ...activeMakeMethodIds
+      ];
+
+      if (activeMakeMethodIds.length > 0) {
+        await trx
+          .updateTable("makeMethod")
+          .set({
+            status: "Archived",
+            updatedBy: payload.userId,
+            updatedAt
+          })
+          .where("id", "in", activeMakeMethodIds)
+          .execute();
+      }
+
+      await trx
+        .updateTable("makeMethod")
+        .set({
+          status: "Active",
+          updatedBy: payload.userId,
+          updatedAt
+        })
+        .where("id", "=", payload.id)
+        .execute();
+
+      if (relatedMakeMethodIds.length > 0) {
+        await trx
+          .updateTable("methodMaterial")
+          .set({
+            materialMakeMethodId: payload.id,
+            updatedBy: payload.userId,
+            updatedAt
+          })
+          .where("materialMakeMethodId", "in", relatedMakeMethodIds)
+          .where("companyId", "=", payload.companyId)
+          .execute();
+      }
+    });
+
+    return { data: { convertedId: payload.id }, error: null };
+  } catch (error) {
+    return { data: null, error };
+  }
 }
 
 export async function copyItem(

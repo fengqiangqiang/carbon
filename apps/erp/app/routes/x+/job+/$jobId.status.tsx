@@ -2,14 +2,10 @@ import { assertIsPost, error, success } from "@carbon/auth";
 import { requirePermissions } from "@carbon/auth/auth.server";
 import { getCarbonServiceRole } from "@carbon/auth/client.server";
 import { flash } from "@carbon/auth/session.server";
+import { trigger } from "@carbon/jobs";
 import type { ActionFunctionArgs } from "react-router";
 import { redirect } from "react-router";
-import {
-  jobStatus,
-  recalculateJobRequirements,
-  runMRP,
-  updateJobStatus
-} from "~/modules/production";
+import { jobStatus, updateJobStatus } from "~/modules/production";
 import { path, requestReferrer } from "~/utils/path";
 
 export async function action({ request, params }: ActionFunctionArgs) {
@@ -52,69 +48,36 @@ export async function action({ request, params }: ActionFunctionArgs) {
     }
   }
 
-  if (["Planned", "Ready"].includes(status)) {
-    const serviceRole = getCarbonServiceRole();
-    await recalculateJobRequirements(serviceRole, {
-      id,
-      companyId,
-      userId
-    });
-    await runMRP(getCarbonServiceRole(), {
-      type: "job",
-      id,
-      companyId,
-      userId
-    });
-  }
-
   if (["Ready", "Planned"].includes(status) && shouldSchedule) {
     try {
       const purchaseOrdersBySupplierId = JSON.parse(
         selectedPurchaseOrdersBySupplierId ?? "{}"
       );
 
-      const serviceRole = getCarbonServiceRole();
-      const [scheduler] = await Promise.all([
-        serviceRole.functions.invoke("schedule", {
-          body: {
-            jobId: id,
-            companyId,
-            userId,
-            mode: "initial",
-            direction: "backward"
+      if (Object.keys(purchaseOrdersBySupplierId).length > 0) {
+        const serviceRole = getCarbonServiceRole();
+        const createPurchaseOrders = await serviceRole.functions.invoke(
+          "create",
+          {
+            body: {
+              type: "purchaseOrderFromJob",
+              jobId: id,
+              purchaseOrdersBySupplierId,
+              companyId,
+              userId
+            }
           }
-        }),
-        serviceRole.functions.invoke("create", {
-          body: {
-            type: "purchaseOrderFromJob",
-            jobId: id,
-            purchaseOrdersBySupplierId,
-            companyId,
-            userId
-          }
-        })
-      ]);
-
-      if (scheduler.error) {
-        throw redirect(
-          requestReferrer(request) ?? path.to.job(id),
-          await flash(request, error(scheduler.error, "Failed to schedule job"))
         );
-      }
 
-      if (status === "Ready") {
-        await client
-          .from("job")
-          .update({
-            releasedDate: new Date().toISOString()
-          })
-          .eq("id", id);
+        if (createPurchaseOrders.error) {
+          throw createPurchaseOrders.error;
+        }
       }
     } catch (err) {
       console.error(err);
       throw redirect(
         requestReferrer(request) ?? path.to.job(id),
-        await flash(request, error(err, "Failed to schedule job"))
+        await flash(request, error(err, "Failed to create purchase orders"))
       );
     }
   }
@@ -130,6 +93,36 @@ export async function action({ request, params }: ActionFunctionArgs) {
       requestReferrer(request) ?? path.to.job(id),
       await flash(request, error(update.error, "Failed to update job status"))
     );
+  }
+
+  if (status === "Ready" && shouldSchedule) {
+    const releaseDate = await client
+      .from("job")
+      .update({
+        releasedDate: new Date().toISOString()
+      })
+      .eq("id", id);
+
+    if (releaseDate.error) {
+      throw redirect(
+        requestReferrer(request) ?? path.to.job(id),
+        await flash(
+          request,
+          error(releaseDate.error, "Failed to set released date")
+        )
+      );
+    }
+  }
+
+  if (["Planned", "Ready"].includes(status)) {
+    await trigger("job-planning", {
+      jobId: id,
+      companyId,
+      userId,
+      shouldSchedule
+    }).catch((err) => {
+      console.error("Failed to trigger job planning", err);
+    });
   }
 
   if (status === "Closed") {

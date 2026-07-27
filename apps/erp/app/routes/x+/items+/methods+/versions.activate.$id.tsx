@@ -1,9 +1,9 @@
 import { assertIsPost } from "@carbon/auth";
 import { requirePermissions } from "@carbon/auth/auth.server";
-import { getCarbonServiceRole } from "@carbon/auth/client.server";
 import type { ActionFunctionArgs } from "react-router";
 import { redirect } from "react-router";
 import { activateMethodVersion } from "~/modules/items/items.service";
+import { getDatabaseClient } from "~/services/database.server";
 import { requestReferrer } from "~/utils/path";
 
 export async function action({ request, params }: ActionFunctionArgs) {
@@ -20,16 +20,20 @@ export async function action({ request, params }: ActionFunctionArgs) {
     return { success: false, message: "Invalid operation tool id" };
   }
 
-  const update = await activateMethodVersion(getCarbonServiceRole(), {
+  const update = await activateMethodVersion(getDatabaseClient(), {
     id,
     companyId,
     userId
   });
 
   if (update.error) {
+    console.error("Failed to activate method version", update.error);
     return {
       success: false,
-      message: "Failed to activate method version"
+      message:
+        update.error instanceof Error
+          ? update.error.message
+          : "Failed to activate method version"
     };
   }
 

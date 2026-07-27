@@ -87,6 +87,15 @@ export type Events = {
     };
   };
 
+  "carbon/job-planning": {
+    data: {
+      jobId: string;
+      companyId: string;
+      userId: string;
+      shouldSchedule?: boolean;
+    };
+  };
+
   // User administration
   "carbon/user-admin": {
     data:

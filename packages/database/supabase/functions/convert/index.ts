@@ -151,59 +151,33 @@ serve(async (req: Request) => {
           .single();
         if (makeMethod.error) throw new Error(makeMethod.error.message);
 
-        const [relatedMakeMethods, draftQuotes, draftJobs] = await Promise.all([
-          client
-            .from("makeMethod")
-            .select("*")
-            .eq("itemId", makeMethod.data?.itemId)
-            .eq("companyId", companyId),
-          client
-            .from("quote")
-            .select("*")
-            .eq("companyId", companyId)
-            .eq("status", "Draft"),
-          client
-            .from("job")
-            .select("*")
-            .eq("companyId", companyId)
-            .eq("status", "Draft"),
-        ]);
+        const relatedMakeMethods = await client
+          .from("makeMethod")
+          .select("*")
+          .eq("itemId", makeMethod.data?.itemId)
+          .eq("companyId", companyId);
 
         if (relatedMakeMethods.error)
           throw new Error(relatedMakeMethods.error.message);
 
-        if (draftQuotes.error) throw new Error(draftQuotes.error.message);
-        if (draftJobs.error) throw new Error(draftJobs.error.message);
-
-        const draftMakeMethodIds = relatedMakeMethods.data
-          ?.filter(
+        const draftMakeMethodIds = (relatedMakeMethods.data ?? [])
+          .filter(
             (makeMethod) =>
               makeMethod.id !== makeMethodId && makeMethod.status === "Draft"
           )
-          ?.map((makeMethod) => makeMethod.id);
+          .map((makeMethod) => makeMethod.id);
 
-        const activeMakeMethodIds = relatedMakeMethods.data
-          ?.filter(
+        const activeMakeMethodIds = (relatedMakeMethods.data ?? [])
+          .filter(
             (makeMethod) =>
               makeMethod.id !== makeMethodId && makeMethod.status === "Active"
           )
-          ?.map((makeMethod) => makeMethod.id);
+          .map((makeMethod) => makeMethod.id);
 
         const relatedMakeMethodIds = [
-          ...(draftMakeMethodIds ?? []),
-          ...(activeMakeMethodIds ?? []),
+          ...draftMakeMethodIds,
+          ...activeMakeMethodIds,
         ];
-
-        const [methodMaterials] = await Promise.all([
-          client
-            .from("methodMaterial")
-            .select("*")
-            .in("materialMakeMethodId", relatedMakeMethodIds)
-            .eq("companyId", companyId),
-        ]);
-
-        if (methodMaterials.error)
-          throw new Error(methodMaterials.error.message);
 
         await db.transaction().execute(async (trx) => {
           if (activeMakeMethodIds.length > 0) {

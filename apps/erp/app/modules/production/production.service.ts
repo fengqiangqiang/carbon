@@ -1,5 +1,6 @@
 import type { Database, Json } from "@carbon/database";
 import { fetchAllFromTable } from "@carbon/database";
+import type { Kysely, KyselyDatabase, KyselyTx } from "@carbon/database/client";
 import type { JSONContent } from "@carbon/react";
 import { parseDate } from "@internationalized/date";
 import type { FileObject, StorageError } from "@supabase/storage-js";
@@ -2157,6 +2158,503 @@ export async function upsertProductionQuantity(
         .select("id")
         .single()
     );
+  }
+}
+
+type MethodTreeRowBase =
+  Database["public"]["Functions"]["get_method_tree"]["Returns"][number];
+type MethodTreeRow = Omit<
+  MethodTreeRowBase,
+  | "makeMethodId"
+  | "materialMakeMethodId"
+  | "operationId"
+  | "parentMaterialId"
+  | "storageUnitIds"
+  | "unitCost"
+> & {
+  makeMethodId: string | null;
+  materialMakeMethodId: string | null;
+  operationId: string | null;
+  parentMaterialId: string | null;
+  storageUnitIds: Json | null;
+  unitCost: number | null;
+};
+
+type MethodTreeNode = {
+  id: string;
+  data: MethodTreeRow;
+  children: MethodTreeNode[];
+};
+
+function methodRowsToTree(rows: MethodTreeRow[]): MethodTreeNode[] {
+  const roots: MethodTreeNode[] = [];
+  const lookup = new Map<string, MethodTreeNode>();
+
+  for (const row of rows) {
+    const id = row.methodMaterialId;
+    const parentId = row.parentMaterialId;
+    const node = lookup.get(id) ?? { id, data: row, children: [] };
+    node.data = row;
+    lookup.set(id, node);
+
+    if (!parentId) {
+      roots.push(node);
+    } else {
+      const parent =
+        lookup.get(parentId) ??
+        ({ id: parentId, children: [] } as unknown as MethodTreeNode);
+      lookup.set(parentId, parent);
+      parent.children.push(node);
+    }
+  }
+
+  return roots;
+}
+
+function getConfiguredStorageUnitId(
+  storageUnitIds: Json | null,
+  locationId: string | null | undefined
+) {
+  if (!locationId || !storageUnitIds || typeof storageUnitIds !== "object") {
+    return null;
+  }
+
+  const storageUnitId = (storageUnitIds as Record<string, unknown>)[locationId];
+  return typeof storageUnitId === "string" ? storageUnitId : null;
+}
+
+async function getMaterialStorageUnitId(
+  trx: KyselyTx,
+  itemId: string,
+  locationId: string | null | undefined,
+  configuredStorageUnitId: string | null
+) {
+  if (configuredStorageUnitId) return configuredStorageUnitId;
+  if (!locationId) return null;
+
+  const pickMethod = await trx
+    .selectFrom("pickMethod")
+    .select("defaultStorageUnitId")
+    .where("itemId", "=", itemId)
+    .where("locationId", "=", locationId)
+    .executeTakeFirst();
+
+  return pickMethod?.defaultStorageUnitId ?? null;
+}
+
+function toPostgrestError(error: unknown): PostgrestError {
+  return {
+    name: "PostgrestError",
+    message: error instanceof Error ? error.message : "Failed to copy method",
+    details: "",
+    hint: "",
+    code: ""
+  };
+}
+
+export async function copyItemMethodToJob(
+  db: Kysely<KyselyDatabase>,
+  client: SupabaseClient<Database>,
+  input: {
+    itemId: string;
+    jobId: string;
+    companyId: string;
+    userId: string;
+    configuration?: Record<string, unknown>;
+  }
+): Promise<{ data: { id: string } | null; error: PostgrestError | null }> {
+  try {
+    const [makeMethod, job, jobMakeMethod] = await Promise.all([
+      client
+        .from("activeMakeMethods")
+        .select("id, version")
+        .eq("itemId", input.itemId)
+        .eq("companyId", input.companyId)
+        .single(),
+      client
+        .from("job")
+        .select("id, locationId, quantity")
+        .eq("id", input.jobId)
+        .eq("companyId", input.companyId)
+        .single(),
+      client
+        .from("jobMakeMethod")
+        .select("id")
+        .eq("jobId", input.jobId)
+        .is("parentMaterialId", null)
+        .eq("companyId", input.companyId)
+        .single()
+    ]);
+
+    if (makeMethod.error) return { data: null, error: makeMethod.error };
+    if (job.error) return { data: null, error: job.error };
+    if (jobMakeMethod.error) return { data: null, error: jobMakeMethod.error };
+
+    const makeMethodData = makeMethod.data;
+    const jobData = job.data;
+    const jobMakeMethodData = jobMakeMethod.data;
+    if (!makeMethodData?.id || !jobData || !jobMakeMethodData?.id) {
+      return {
+        data: null,
+        error: {
+          name: "PostgrestError",
+          message: "Missing job method source data",
+          details: "",
+          hint: "",
+          code: ""
+        }
+      };
+    }
+
+    const treeResult = await client.rpc("get_method_tree", {
+      uid: makeMethodData.id
+    });
+    if (treeResult.error) return { data: null, error: treeResult.error };
+
+    const methodRows = (treeResult.data ?? []) as MethodTreeRow[];
+    const roots = methodRowsToTree(methodRows);
+    const root = roots.find((node) => node.data.isRoot) ?? roots[0];
+    if (!root) {
+      return {
+        data: null,
+        error: {
+          name: "PostgrestError",
+          message: "Method tree not found",
+          details: "",
+          hint: "",
+          code: ""
+        }
+      };
+    }
+
+    const itemIds = [...new Set(methodRows.map((row) => row.itemId))];
+    const makeMethodIds = [
+      ...new Set(
+        methodRows
+          .map((row) => row.materialMakeMethodId)
+          .filter((id): id is string => Boolean(id))
+      )
+    ];
+
+    const replenishments = itemIds.length
+      ? await client
+          .from("itemReplenishment")
+          .select("itemId, scrapPercentage")
+          .in("itemId", itemIds)
+          .eq("companyId", input.companyId)
+      : { data: [], error: null };
+
+    if (replenishments.error) {
+      return { data: null, error: replenishments.error };
+    }
+
+    const operations = makeMethodIds.length
+      ? await db
+          .selectFrom("methodOperation")
+          .selectAll()
+          .where("makeMethodId", "in", makeMethodIds)
+          .where("companyId", "=", input.companyId)
+          .orderBy("order")
+          .execute()
+      : [];
+
+    const operationIds = operations.map((operation) => operation.id);
+    const [operationTools, operationParameters, operationSteps] =
+      operationIds.length > 0
+        ? await Promise.all([
+            db
+              .selectFrom("methodOperationTool")
+              .selectAll()
+              .where("operationId", "in", operationIds)
+              .execute(),
+            db
+              .selectFrom("methodOperationParameter")
+              .selectAll()
+              .where("operationId", "in", operationIds)
+              .execute(),
+            db
+              .selectFrom("methodOperationStep")
+              .selectAll()
+              .where("operationId", "in", operationIds)
+              .execute()
+          ])
+        : [[], [], []];
+
+    const scrapPercentageByItemId = new Map(
+      (replenishments.data ?? []).map((row) => [
+        row.itemId,
+        Number(row.scrapPercentage ?? 0)
+      ])
+    );
+    const operationsByMakeMethodId = new Map<string, typeof operations>();
+    for (const operation of operations) {
+      const existing =
+        operationsByMakeMethodId.get(operation.makeMethodId) ?? [];
+      existing.push(operation);
+      operationsByMakeMethodId.set(operation.makeMethodId, existing);
+    }
+
+    await db.transaction().execute(async (trx) => {
+      await trx
+        .deleteFrom("jobOperation")
+        .where("jobId", "=", input.jobId)
+        .execute();
+      await trx
+        .deleteFrom("jobMaterial")
+        .where("jobId", "=", input.jobId)
+        .execute();
+      await trx
+        .deleteFrom("jobMakeMethod")
+        .where("jobId", "=", input.jobId)
+        .where("parentMaterialId", "is not", null)
+        .execute();
+
+      await trx
+        .updateTable("jobMakeMethod")
+        .set({
+          version: makeMethod.data.version ?? 1,
+          updatedAt: new Date().toISOString(),
+          updatedBy: input.userId
+        })
+        .where("id", "=", jobMakeMethodData.id)
+        .execute();
+
+      if (input.configuration) {
+        await trx
+          .updateTable("job")
+          .set({
+            configuration: JSON.stringify(input.configuration),
+            updatedAt: new Date().toISOString(),
+            updatedBy: input.userId
+          })
+          .where("id", "=", input.jobId)
+          .execute();
+      }
+
+      async function copyNode(
+        node: MethodTreeNode,
+        targetJobMakeMethodId: string,
+        parentQuantity: number
+      ) {
+        const quantity = Number(node.data.quantity ?? 1);
+        const targetQuantity = node.data.isRoot
+          ? parentQuantity
+          : parentQuantity * quantity;
+        const scrapPercentage = Number(
+          scrapPercentageByItemId.get(node.data.itemId) ?? 0
+        );
+        const scrapQuantity = targetQuantity * scrapPercentage;
+        const totalWithScrap = Math.ceil(targetQuantity + scrapQuantity);
+        const nodeOperations = node.data.materialMakeMethodId
+          ? (operationsByMakeMethodId.get(node.data.materialMakeMethodId) ?? [])
+          : [];
+        const operationIdByMethodOperationId = new Map<string, string>();
+
+        if (nodeOperations?.length) {
+          const insertedOperations = await trx
+            .insertInto("jobOperation")
+            .values(
+              nodeOperations.map((operation) => ({
+                jobId: input.jobId,
+                jobMakeMethodId: targetJobMakeMethodId,
+                processId: operation.processId,
+                procedureId: operation.procedureId,
+                workCenterId: operation.workCenterId,
+                description: operation.description,
+                setupTime: operation.setupTime,
+                setupUnit: operation.setupUnit,
+                laborTime: operation.laborTime,
+                laborUnit: operation.laborUnit,
+                machineTime: operation.machineTime,
+                machineUnit: operation.machineUnit,
+                order: operation.order,
+                operationOrder: operation.operationOrder,
+                operationType: operation.operationType,
+                operationSupplierProcessId:
+                  operation.operationSupplierProcessId,
+                operationMinimumCost: operation.operationMinimumCost ?? 0,
+                operationLeadTime: operation.operationLeadTime ?? 0,
+                operationUnitCost: operation.operationUnitCost ?? 0,
+                tags: operation.tags ?? [],
+                workInstruction: operation.workInstruction ?? {},
+                targetQuantity,
+                operationQuantity: totalWithScrap,
+                companyId: input.companyId,
+                createdBy: input.userId,
+                customFields: {}
+              }))
+            )
+            .returning(["id"])
+            .execute();
+
+          for (const [index, operation] of nodeOperations.entries()) {
+            const insertedOperationId = insertedOperations[index]?.id;
+            if (insertedOperationId) {
+              operationIdByMethodOperationId.set(
+                operation.id,
+                insertedOperationId
+              );
+            }
+          }
+
+          const copiedTools = operationTools
+            .filter((tool) =>
+              operationIdByMethodOperationId.has(tool.operationId)
+            )
+            .map((tool) => ({
+              toolId: tool.toolId,
+              quantity: tool.quantity,
+              operationId: operationIdByMethodOperationId.get(
+                tool.operationId
+              )!,
+              companyId: input.companyId,
+              createdBy: input.userId
+            }));
+          if (copiedTools.length) {
+            await trx
+              .insertInto("jobOperationTool")
+              .values(copiedTools)
+              .execute();
+          }
+
+          const copiedParameters = operationParameters
+            .filter((param) =>
+              operationIdByMethodOperationId.has(param.operationId)
+            )
+            .map((param) => ({
+              key: param.key,
+              value: param.value,
+              operationId: operationIdByMethodOperationId.get(
+                param.operationId
+              )!,
+              companyId: input.companyId,
+              createdBy: input.userId
+            }));
+          if (copiedParameters.length) {
+            await trx
+              .insertInto("jobOperationParameter")
+              .values(copiedParameters)
+              .execute();
+          }
+
+          const copiedSteps = operationSteps
+            .filter((step) =>
+              operationIdByMethodOperationId.has(step.operationId)
+            )
+            .map((step) => ({
+              name: step.name,
+              type: step.type,
+              description: step.description,
+              sortOrder: step.sortOrder,
+              required: step.required,
+              minValue: step.minValue,
+              maxValue: step.maxValue,
+              listValues: step.listValues,
+              fileTypes: step.fileTypes,
+              unitOfMeasureCode: step.unitOfMeasureCode,
+              operationId: operationIdByMethodOperationId.get(
+                step.operationId
+              )!,
+              companyId: input.companyId,
+              createdBy: input.userId
+            }));
+          if (copiedSteps.length) {
+            await trx
+              .insertInto("jobOperationStep")
+              .values(copiedSteps)
+              .execute();
+          }
+        }
+
+        for (const child of node.children) {
+          const childQuantity = Number(child.data.quantity ?? 1);
+          const childTargetQuantity = totalWithScrap * childQuantity;
+          const childScrapPercentage = Number(
+            scrapPercentageByItemId.get(child.data.itemId) ?? 0
+          );
+          const childScrapQuantity = childTargetQuantity * childScrapPercentage;
+          const childTotalWithScrap = Math.ceil(
+            childTargetQuantity + childScrapQuantity
+          );
+          const childEstimatedQuantity =
+            child.data.methodType === "Make to Order"
+              ? childTargetQuantity
+              : childTotalWithScrap;
+          const storageUnitId = await getMaterialStorageUnitId(
+            trx,
+            child.data.itemId,
+            jobData.locationId,
+            getConfiguredStorageUnitId(
+              child.data.storageUnitIds,
+              jobData.locationId
+            )
+          );
+
+          const insertedMaterial = await trx
+            .insertInto("jobMaterial")
+            .values({
+              jobId: input.jobId,
+              jobMakeMethodId: targetJobMakeMethodId,
+              jobOperationId: child.data.operationId
+                ? operationIdByMethodOperationId.get(child.data.operationId)
+                : null,
+              itemId: child.data.itemId,
+              itemType: child.data.itemType,
+              kit: child.data.kit,
+              methodType: child.data.methodType,
+              order: child.data.order,
+              description: child.data.description,
+              quantity: childQuantity,
+              scrapQuantity: childScrapQuantity,
+              estimatedQuantity: childEstimatedQuantity,
+              storageUnitId,
+              requiresSerialTracking: child.data.itemTrackingType === "Serial",
+              requiresBatchTracking: child.data.itemTrackingType === "Batch",
+              unitOfMeasureCode: child.data.unitOfMeasureCode,
+              unitCost: child.data.unitCost ?? 0,
+              itemScrapPercentage: childScrapPercentage,
+              companyId: input.companyId,
+              createdBy: input.userId,
+              customFields: {}
+            })
+            .returning(["id"])
+            .executeTakeFirstOrThrow();
+
+          if (child.data.methodType === "Make to Order") {
+            const childJobMakeMethod = await trx
+              .selectFrom("jobMakeMethod")
+              .select("id")
+              .where("jobId", "=", input.jobId)
+              .where("parentMaterialId", "=", insertedMaterial.id)
+              .executeTakeFirst();
+
+            if (childJobMakeMethod) {
+              await trx
+                .updateTable("jobMakeMethod")
+                .set({
+                  version: child.data.version ?? 1,
+                  updatedAt: new Date().toISOString(),
+                  updatedBy: input.userId
+                })
+                .where("id", "=", childJobMakeMethod.id)
+                .execute();
+
+              await copyNode(
+                child,
+                childJobMakeMethod.id,
+                childTotalWithScrap || 1
+              );
+            }
+          }
+        }
+      }
+
+      await copyNode(root, jobMakeMethodData.id, Number(jobData.quantity ?? 1));
+    });
+
+    return { data: { id: input.jobId }, error: null };
+  } catch (err) {
+    return { data: null, error: toPostgrestError(err) };
   }
 }
 
